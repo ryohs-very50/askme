@@ -15,6 +15,9 @@ require("dotenv").config();
 const { App } = require("@slack/bolt");
 const { Client: Notion } = require("@notionhq/client");
 
+// Bolt初期化の後あたりに追加（Expressに直接生やせます）
+app.receiver.app.get("/", (_req, res) => res.status(200).send("very50-askme ok"));
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
