@@ -1,22 +1,28 @@
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 
+const { App } = require("@slack/bolt");
+const { Client: Notion } = require("@notionhq/client");
+
 console.log("ENV CHECK:", {
-  cwd: process.cwd(),
-  envPath: path.join(__dirname, ".env"),
   SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN ? "OK" : "MISSING",
   SLACK_SIGNING_SECRET: process.env.SLACK_SIGNING_SECRET ? "OK" : "MISSING",
   SLACK_APP_TOKEN: process.env.SLACK_APP_TOKEN ? "OK" : "MISSING",
   NOTION_TOKEN: process.env.NOTION_TOKEN ? "OK" : "MISSING",
   OPENAI_API_KEY: process.env.OPENAI_API_KEY ? "OK" : "MISSING",
 });
-
-require("dotenv").config();
-const { App } = require("@slack/bolt");
-const { Client: Notion } = require("@notionhq/client");
-
-// Bolt初期化の後あたりに追加（Expressに直接生やせます）
-app.receiver.app.get("/", (_req, res) => res.status(200).send("very50-askme ok"));
+const required = [
+  "SLACK_BOT_TOKEN",
+  "SLACK_SIGNING_SECRET",
+  "SLACK_APP_TOKEN",
+  "NOTION_TOKEN",
+  "OPENAI_API_KEY",
+];
+const missing = required.filter((k) => !process.env[k]);
+if (missing.length) {
+  console.error("❌ Missing ENV:", missing);
+  process.exit(1);
+}
 
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
@@ -104,11 +110,6 @@ function escapeMrkdwn(s) {
   return s.replace(/([_*`~])/g, "\\$1");
 }
 
-(async () => {
-  await app.start(process.env.PORT || 3000);
-  console.log("⚡️ very50-askme is running (Socket Mode)!");
-})();
-
 async function getPagePlainText(notion, pageId, maxChars = 6000) {
   let text = "";
   let cursor;
@@ -171,10 +172,44 @@ async function summarizeWithGPT(question, sourceText, pageUrl) {
     sourceText,
   ].join("\n");
 
-  const resp = await openai.responses.create({
-    model: "gpt-4o-mini",
-    input: prompt,
-  });
-
-  return resp.output_text || "要約を生成できませんでした。";
+  const maxRetries = 2;
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const resp = await openai.responses.create({
+        model: "gpt-4o-mini",
+        input: prompt,
+      });
+      return resp.output_text || "要約を生成できませんでした。";
+    } catch (e) {
+      // 429/レート・クォータ系はちょい待ちして再試行
+      const code = e?.status || e?.code;
+      if ((code === 429 || code === "insufficient_quota") && i < maxRetries) {
+        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+        continue;
+      }
+      throw e;
+    }
+  }
 }
+
+(async () => {
+  // 1) Bolt（Socket Mode）: ポート指定なし
+  await app.start();
+  console.log("⚡️ very50-askme is running in Socket Mode!");
+
+  // 2) Render向けヘルスサーバ（/ に 200 を返すだけ）
+  const http = require("http");
+  const PORT = process.env.PORT || 3000;
+  const server = http.createServer((req, res) => {
+    if (req.url === "/") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("very50-askme ok");
+    } else {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+    }
+  });
+  server.listen(PORT, () => {
+    console.log(`🩺 health server listening on ${PORT}`);
+  });
+})();
